@@ -16,7 +16,7 @@
 #include "protocol/MessageRegistry.h"
 #include "state/ServerState.h"
 #include "tr/LedRing.h"
-#include "tr/SendspinSignal.h"
+#include "tr/SendspinControl.h"
 #include "util/Log.h"
 
 #include "api.pb.h"
@@ -91,6 +91,30 @@ void Satellite::OnStopDetected() {
         Unduck();
         lva::tr::Show(lva::tr::LedState::Idle);
     }
+}
+
+bool Satellite::AbortSpeechIfSpeaking() {
+    if (announce_player_ == nullptr) return false;
+
+    const auto st = announce_player_->State();
+    const bool speaking = (st == lva::audio::PlayerState::kPlaying ||
+                           st == lva::audio::PlayerState::kLoading);
+    if (!speaking) return false;
+
+    LVA_LOGI(kTag, "tap during TTS → stopping speech");
+    announce_player_->Stop();
+    pipeline_active_       = false;
+    continue_conversation_ = false;
+    continue_listen_at_ns_.store(0, std::memory_order_relaxed);
+    Unduck();
+    lva::tr::Show(lva::tr::LedState::Idle);
+
+    if (state_.broadcast) {
+        ::VoiceAssistantAnnounceFinished done;
+        state_.broadcast(lva::proto::kIdVoiceAssistantAnnounceFinished, done);
+    }
+
+    return true;
 }
 
 void Satellite::StartPipeline(const std::string& wake_word_phrase) {

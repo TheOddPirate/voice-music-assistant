@@ -46,8 +46,9 @@
 #include "satellite/Satellite.h"
 #include "state/Preferences.h"
 #include "state/ServerState.h"
-#include "tr/HomeButton.h"
+#include "tr/ButtonMonitor.h"
 #include "tr/MicMuteGpio.h"
+#include "tr/SendspinControl.h"
 #include "tr/SoundConfWatcher.h"
 #include "tr/Supervisor.h"
 #include "tr/SupervisorHttpServer.h"
@@ -593,14 +594,20 @@ int main(int argc, char** argv) {
         }));
 
     const std::uint32_t home_button_entity_key = next_key++;
-    state.entities.push_back(std::make_unique<lva::entities::EventEntity>(
-        home_button_entity_key,
-        lva::entities::EventEntity::Config{
-            .object_id    = "thirdreality_home_button",
-            .display_name = "Home Button",
-            .icon         = "mdi:gesture-tap-button",
-            .event_types  = {"single_press", "double_press", "triple_press"},
-        }));
+    lva::entities::EventEntity* home_button_entity = nullptr;
+    {
+        auto ev = std::make_unique<lva::entities::EventEntity>(
+            home_button_entity_key,
+            lva::entities::EventEntity::Config{
+                .object_id    = "thirdreality_home_button",
+                .display_name = "Home Button",
+                .icon         = "mdi:gesture-tap-button",
+                .event_types  = {"single_press", "double_press",
+                                 "triple_press"},
+            });
+        home_button_entity = ev.get();
+        state.entities.push_back(std::move(ev));
+    }
 
     lva::entities::UpdateEntity* update_entity_ptr = nullptr;
     {
@@ -896,10 +903,18 @@ int main(int argc, char** argv) {
         LVA_LOGW(kTag, "timerfd_create failed; satellite ticks disabled");
     }
 
-    lva::tr::HomeButton::Options home_btn_opts;
-    home_btn_opts.entity_key = home_button_entity_key;
-    auto home_button = std::make_unique<lva::tr::HomeButton>(
-        home_btn_opts, state);
+    // Home button (KEY_HOME): reported to Home Assistant as press events.
+    lva::tr::ButtonMonitor::Options home_btn_opts;
+    home_btn_opts.keycode       = 102;   // KEY_HOME
+    home_btn_opts.tap_window_ms = 500;
+    auto home_button = std::make_unique<lva::tr::ButtonMonitor>(
+        home_btn_opts, [&state, home_button_entity](int taps) {
+            if (home_button_entity == nullptr || !state.broadcast) return;
+            const char* event_type = (taps == 1)   ? "single_press"
+                                     : (taps == 2)  ? "double_press"
+                                                    : "triple_press";
+            home_button_entity->Trigger(event_type, state.broadcast);
+        });
     {
         const int hb_fd = home_button->Start();
         if (hb_fd >= 0) {
@@ -911,6 +926,34 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Tap key (KEY_SELECT). lva owns this key; sendspin-client no longer
+    // reads the input device. A single tap aborts speech while the voice
+    // assistant is talking, otherwise it toggles sendspin music play/pause;
+    // a double tap toggles the sendspin LED effect.
+    lva::tr::ButtonMonitor::Options tap_opts;
+    tap_opts.keycode       = 353;   // KEY_SELECT
+    tap_opts.tap_window_ms = 350;
+    auto tap_button = std::make_unique<lva::tr::ButtonMonitor>(
+        tap_opts, [&satellite](int taps) {
+            if (taps == 1) {
+                if (satellite && satellite->AbortSpeechIfSpeaking()) {
+                    return;
+                }
+                lva::tr::SendspinMusicToggle();
+            } else if (taps >= 2) {
+                lva::tr::SendspinLedToggle();
+            }
+        });
+    {
+        const int tap_fd = tap_button->Start();
+        if (tap_fd >= 0) {
+            server.AddAuxFd(tap_fd, [&tap_button] {
+                tap_button->OnMainLoopWake();
+            });
+        } else {
+            LVA_LOGW(kTag, "tap button monitor disabled");
+        }
+    }
 
     const int rc = server.Run();
     g_server = nullptr;
@@ -919,6 +962,7 @@ int main(int argc, char** argv) {
     if (supervisor_http) supervisor_http->Stop();
     mdns.Stop();
     home_button->Stop();
+    tap_button->Stop();
     wakeword_engine->Stop();
     audio_capture->Stop();
 

@@ -27,90 +27,78 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
-#include <fcntl.h>
+#include <cstring>
 #include <fstream>
-#include <linux/input.h>
+#include <functional>
 #include <mutex>
-#include <poll.h>
-#include <signal.h>
 #include <string>
 #include <thread>
+
+#include <signal.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 using namespace sendspin;
 
 static std::atomic<bool> g_running{true};
 static std::atomic<bool> g_ducked{false};
-static std::atomic<int> g_tap_action{0};  // 0=none, 1=single tap, 2=double tap
 static void signal_handler(int) { g_running = false; }
-static void sigusr1_handler(int) { g_ducked = true; }
-static void sigusr2_handler(int) { g_ducked = false; }
 
 // ============================================================================
-// Input monitor — detects single/double tap on the Tap key
+// Control socket — receives tap commands from lva over a Unix domain
+// datagram socket. lva owns the tap key; this process no longer reads the
+// input device directly.
 // ============================================================================
 
-class InputMonitor {
+class ControlSocket {
  public:
-  InputMonitor(const char *device, int keycode, std::atomic<int> &action)
-      : device_(device), keycode_(keycode), action_(action) {}
+  static constexpr const char *PATH = "/tmp/sendspin-control.sock";
 
-  ~InputMonitor() { stop(); }
+  // Binds the datagram socket. Returns false on failure (commands are then
+  // simply never received; the rest of the client keeps working).
+  bool open() {
+    fd_ = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    if (fd_ < 0) {
+      fprintf(stderr, "[sendspin] control socket() failed\n");
+      return false;
+    }
+    unlink(PATH);  // clear a stale socket from a previous run
 
-  void start() {
-    thread_ = std::thread([this] { run(); });
+    struct sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, PATH, sizeof(addr.sun_path) - 1);
+    if (bind(fd_, reinterpret_cast<struct sockaddr *>(&addr),
+             sizeof(addr)) < 0) {
+      fprintf(stderr, "[sendspin] control bind(%s) failed\n", PATH);
+      close(fd_);
+      fd_ = -1;
+      return false;
+    }
+    return true;
   }
 
-  void stop() {
-    running_ = false;
-    if (thread_.joinable()) thread_.join();
+  ~ControlSocket() {
+    if (fd_ >= 0) {
+      close(fd_);
+      unlink(PATH);
+    }
+  }
+
+  // Drain all pending datagrams; dispatch recognized commands.
+  void poll(const std::function<void(const char *)> &on_command) {
+    if (fd_ < 0) return;
+    char buf[64];
+    while (true) {
+      ssize_t n = recv(fd_, buf, sizeof(buf) - 1, MSG_DONTWAIT);
+      if (n <= 0) break;
+      buf[n] = '\0';
+      on_command(buf);
+    }
   }
 
  private:
-  void run() {
-    int fd = open(device_, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) {
-      fprintf(stderr, "[sendspin] input open(%s) failed\n", device_);
-      return;
-    }
-
-    int count = 0;
-    int64_t last_release = 0;
-    constexpr int64_t kWindowUs = 350000;  // 350ms multi-tap window
-
-    while (running_) {
-      struct pollfd pfd{fd, POLLIN, 0};
-      int ret = poll(&pfd, 1, 100);
-      if (ret <= 0) {
-        // Timeout: flush pending taps if window expired
-        if (count > 0 && (now_us() - last_release) > kWindowUs) {
-          action_.store(count > 1 ? 2 : 1);
-          count = 0;
-        }
-        continue;
-      }
-
-      struct input_event ev;
-      if (read(fd, &ev, sizeof(ev)) != sizeof(ev)) continue;
-      if (ev.type != EV_KEY || ev.code != keycode_ || ev.value != 0) continue;
-
-      // Key release detected
-      count++;
-      last_release = now_us();
-    }
-    close(fd);
-  }
-
-  static int64_t now_us() {
-    return std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
-  }
-
-  const char *device_;
-  int keycode_;
-  std::atomic<int> &action_;
-  std::atomic<bool> running_{true};
-  std::thread thread_;
+  int fd_ = -1;
 };
 
 static constexpr const char *SOUND_CONF = "/data/conf/sound.json";
@@ -879,14 +867,6 @@ int main(int argc, char *argv[]) {
   sigaction(SIGINT, &sa_quit, nullptr);
   sigaction(SIGTERM, &sa_quit, nullptr);
 
-  struct sigaction sa_duck{};
-  sigemptyset(&sa_duck.sa_mask);
-  sa_duck.sa_flags = SA_RESTART;
-  sa_duck.sa_handler = sigusr1_handler;
-  sigaction(SIGUSR1, &sa_duck, nullptr);
-  sa_duck.sa_handler = sigusr2_handler;
-  sigaction(SIGUSR2, &sa_duck, nullptr);
-
   SendspinClient::set_log_level(log_level);
 
   SendspinClientConfig config;
@@ -963,26 +943,33 @@ int main(int argc, char *argv[]) {
   fprintf(stderr, "[sendspin] listening as \"%s\"\n", friendly_name.c_str());
   if (!connect_url.empty()) client.connect_to(connect_url);
 
-  // Tap key monitor (keycode 353 on /dev/input/event0)
-  InputMonitor tap_monitor("/dev/input/event0", 353, g_tap_action);
-  tap_monitor.start();
+  // Control socket: tap commands arrive from lva, which owns the tap key.
+  ControlSocket control;
+  if (!control.open()) {
+    fprintf(stderr, "[sendspin] control socket unavailable; "
+                    "tap commands disabled\n");
+  }
 
   int poll_count = 0;
   while (g_running) {
     client.loop();
     led_ctrl.tick();
 
-    int tap = g_tap_action.exchange(0);
-    if (tap == 1) {
-      // Single tap: play/pause toggle based on group playback state
-      if (client.get_group_state().playback_state == SendspinPlaybackState::PLAYING)
-        controller.send_command({.command = SendspinControllerCommand::PAUSE});
-      else
-        controller.send_command({.command = SendspinControllerCommand::PLAY});
-    } else if (tap == 2) {
-      // Double tap: toggle LED effect
-      led_ctrl.toggle_enabled();
-    }
+    control.poll([&](const char *cmd) {
+      if (strcmp(cmd, "MUSIC_TOGGLE") == 0) {
+        if (client.get_group_state().playback_state ==
+            SendspinPlaybackState::PLAYING)
+          controller.send_command({.command = SendspinControllerCommand::PAUSE});
+        else
+          controller.send_command({.command = SendspinControllerCommand::PLAY});
+      } else if (strcmp(cmd, "LED_TOGGLE") == 0) {
+        led_ctrl.toggle_enabled();
+      } else if (strcmp(cmd, "DUCK") == 0) {
+        g_ducked = true;
+      } else if (strcmp(cmd, "UNDUCK") == 0) {
+        g_ducked = false;
+      }
+    });
 
     if (++poll_count >= 30) {
       poll_count = 0;

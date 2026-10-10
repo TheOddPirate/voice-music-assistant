@@ -177,11 +177,11 @@ add_executable(linux-voice-assistant-cpp
     src/audio/WakeWordScanner.cpp
     src/audio/WebRtcProcessor.cpp
     src/satellite/Satellite.cpp
-    src/tr/HomeButton.cpp
+    src/tr/ButtonMonitor.cpp
     src/tr/LedRing.cpp
     src/tr/MicMuteGpio.cpp
     src/tr/OtaClient.cpp
-    src/tr/SendspinSignal.cpp
+    src/tr/SendspinControl.cpp
     src/tr/SoundConfWatcher.cpp
     src/tr/Supervisor.cpp
     src/tr/SupervisorHttpServer.cpp

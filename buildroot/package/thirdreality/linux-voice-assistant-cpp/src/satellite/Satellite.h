@@ -33,6 +33,12 @@ class Satellite {
     // Called when the stop word fires. Stops TTS / timer ring.
     void OnStopDetected();
 
+    // Abort an in-progress spoken response (TTS / announcement) the same way
+    // the stop word does, without opening the mic. Returns true if speech
+    // was playing and was aborted, false otherwise (idle / listening / music
+    // playing), so the caller can fall back to normal tap handling.
+    bool AbortSpeechIfSpeaking();
+
     bool HandleMessage(std::uint32_t msg_type_id,
                        const ::google::protobuf::MessageLite& msg);
 

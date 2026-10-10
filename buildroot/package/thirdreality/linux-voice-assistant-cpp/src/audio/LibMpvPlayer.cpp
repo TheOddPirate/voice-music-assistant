@@ -258,7 +258,6 @@ void LibMpvPlayer::Stop() {
         LVA_LOGW(kTag, "stop failed: %s", mpv_error_string(rc));
         return;
     }
-    state_.store(PlayerState::kIdle, std::memory_order_relaxed);
 }
 
 void LibMpvPlayer::SetVolume(double normalized) {
