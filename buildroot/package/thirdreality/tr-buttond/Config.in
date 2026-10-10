@@ -1,0 +1,14 @@
+config BR2_PACKAGE_TR_BUTTOND
+	bool "tr-buttond"
+	depends on BR2_INSTALL_LIBSTDCPP
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	help
+	  ThirdReality button daemon.
+
+	  Owns /dev/input/event0 key dispatch (volume, mute, home, tap)
+	  and replaces the policy role of Amlogic's input_eventd. Volume,
+	  mute, factory-reset and wifi actions are delegated to
+	  /etc/adckey/adckey_function.sh; tap/home semantic actions are
+	  forwarded to linux-voice-assistant and sendspin-client over Unix
+	  datagram sockets. Runs independently so keys keep working when
+	  those services are down.

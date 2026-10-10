@@ -46,7 +46,7 @@
 #include "satellite/Satellite.h"
 #include "state/Preferences.h"
 #include "state/ServerState.h"
-#include "tr/ButtonMonitor.h"
+#include "tr/ControlListener.h"
 #include "tr/MicMuteGpio.h"
 #include "tr/SendspinControl.h"
 #include "tr/SoundConfWatcher.h"
@@ -903,55 +903,31 @@ int main(int argc, char** argv) {
         LVA_LOGW(kTag, "timerfd_create failed; satellite ticks disabled");
     }
 
-    // Home button (KEY_HOME): reported to Home Assistant as press events.
-    lva::tr::ButtonMonitor::Options home_btn_opts;
-    home_btn_opts.keycode       = 102;   // KEY_HOME
-    home_btn_opts.tap_window_ms = 500;
-    auto home_button = std::make_unique<lva::tr::ButtonMonitor>(
-        home_btn_opts, [&state, home_button_entity](int taps) {
-            if (home_button_entity == nullptr || !state.broadcast) return;
-            const char* event_type = (taps == 1)   ? "single_press"
-                                     : (taps == 2)  ? "double_press"
-                                                    : "triple_press";
-            home_button_entity->Trigger(event_type, state.broadcast);
-        });
-    {
-        const int hb_fd = home_button->Start();
-        if (hb_fd >= 0) {
-            server.AddAuxFd(hb_fd, [&home_button] {
-                home_button->OnMainLoopWake();
-            });
-        } else {
-            LVA_LOGW(kTag, "home button monitor disabled");
-        }
-    }
-
-    // Tap key (KEY_SELECT). lva owns this key; sendspin-client no longer
-    // reads the input device. A single tap aborts speech while the voice
-    // assistant is talking, otherwise it toggles sendspin music play/pause;
-    // a double tap toggles the sendspin LED effect.
-    lva::tr::ButtonMonitor::Options tap_opts;
-    tap_opts.keycode       = 353;   // KEY_SELECT
-    tap_opts.tap_window_ms = 350;
-    auto tap_button = std::make_unique<lva::tr::ButtonMonitor>(
-        tap_opts, [&satellite](int taps) {
-            if (taps == 1) {
-                if (satellite && satellite->AbortSpeechIfSpeaking()) {
-                    return;
-                }
+    // Button control socket: tr-buttond owns /dev/input/event0 and forwards
+    // tap/home gestures here over a Unix datagram socket. lva no longer reads
+    // the input device.
+    auto control_listener = std::make_unique<lva::tr::ControlListener>(
+        [&state, home_button_entity, &satellite](const std::string& cmd) {
+            if (cmd == "TAP") {
+                if (satellite && satellite->AbortSpeechIfSpeaking()) return;
                 lva::tr::SendspinMusicToggle();
-            } else if (taps >= 2) {
-                lva::tr::SendspinLedToggle();
+            } else if (cmd == "HOME_SINGLE" || cmd == "HOME_DOUBLE" ||
+                       cmd == "HOME_TRIPLE") {
+                if (home_button_entity == nullptr || !state.broadcast) return;
+                const char* event_type = (cmd == "HOME_SINGLE") ? "single_press"
+                                         : (cmd == "HOME_DOUBLE") ? "double_press"
+                                                                  : "triple_press";
+                home_button_entity->Trigger(event_type, state.broadcast);
             }
         });
     {
-        const int tap_fd = tap_button->Start();
-        if (tap_fd >= 0) {
-            server.AddAuxFd(tap_fd, [&tap_button] {
-                tap_button->OnMainLoopWake();
+        const int ctl_fd = control_listener->Start();
+        if (ctl_fd >= 0) {
+            server.AddAuxFd(ctl_fd, [&control_listener] {
+                control_listener->OnReadable();
             });
         } else {
-            LVA_LOGW(kTag, "tap button monitor disabled");
+            LVA_LOGW(kTag, "button control listener disabled");
         }
     }
 
@@ -961,8 +937,6 @@ int main(int argc, char** argv) {
 
     if (supervisor_http) supervisor_http->Stop();
     mdns.Stop();
-    home_button->Stop();
-    tap_button->Stop();
     wakeword_engine->Stop();
     audio_capture->Stop();
 

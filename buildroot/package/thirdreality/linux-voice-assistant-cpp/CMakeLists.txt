@@ -177,7 +177,7 @@ add_executable(linux-voice-assistant-cpp
     src/audio/WakeWordScanner.cpp
     src/audio/WebRtcProcessor.cpp
     src/satellite/Satellite.cpp
-    src/tr/ButtonMonitor.cpp
+    src/tr/ControlListener.cpp
     src/tr/LedRing.cpp
     src/tr/MicMuteGpio.cpp
     src/tr/OtaClient.cpp
