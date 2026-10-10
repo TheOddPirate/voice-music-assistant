@@ -90,6 +90,7 @@ void Satellite::OnStopDetected() {
         if (speech_active_) {
             FinishSpeech(false);
         } else {
+            wake_sound_pending_ = false;
             pipeline_active_ = false;
             Unduck();
             lva::tr::Show(lva::tr::LedState::Idle);
@@ -139,6 +140,29 @@ bool Satellite::AbortSpeechIfSpeaking() {
     return true;
 }
 
+void Satellite::PrepareForMediaAnnouncement() {
+    if (timer_ringing_) {
+        StopTimerRing();
+    }
+    if (wake_sound_pending_.exchange(false, std::memory_order_acq_rel)) {
+        if (announce_player_ != nullptr) announce_player_->Stop();
+        pipeline_active_ = false;
+        Unduck();
+        lva::tr::Show(lva::tr::LedState::Idle);
+    }
+    if (!speech_active_ || announce_player_ == nullptr) return;
+
+    LVA_LOGI(kTag, "media announcement replacing speech");
+    continue_conversation_ = false;
+    continue_listen_at_ns_.store(0, std::memory_order_relaxed);
+    announce_player_->Stop();
+    FinishSpeech(false);
+}
+
+bool Satellite::OwnsAnnouncePlayback() const {
+    return pipeline_active_.load(std::memory_order_acquire) || timer_ringing_;
+}
+
 void Satellite::StartPipeline(const std::string& wake_word_phrase) {
     const auto now = std::chrono::steady_clock::now();
     const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -181,7 +205,12 @@ void Satellite::StartPipeline(const std::string& wake_word_phrase) {
 
     if (announce_player_ != nullptr) {
         const std::string phrase_copy = wake_word_phrase;
+        wake_sound_pending_ = true;
         announce_player_->Play(kWakeupSoundPath, [this, phrase_copy] {
+            if (!wake_sound_pending_.exchange(false,
+                                               std::memory_order_acq_rel)) {
+                return;
+            }
             OpenStreamToHa(phrase_copy);
         });
     } else {
@@ -433,6 +462,7 @@ void Satellite::OnVoiceEvent(
             StopAudioStreaming();
             pipeline_active_       = false;
             continue_conversation_ = false;
+            wake_sound_pending_    = false;
             // Pair the duck() from StartPipeline.
             Unduck();
             break;
@@ -547,6 +577,7 @@ void Satellite::OnDisconnected() {
     pipeline_active_       = false;
     continue_conversation_ = false;
     speech_active_         = false;
+    wake_sound_pending_    = false;
     continue_listen_at_ns_.store(0, std::memory_order_relaxed);
     Unduck();
     lva::tr::Show(lva::tr::LedState::Idle);
@@ -564,6 +595,7 @@ void Satellite::OnMuted() {
         pipeline_active_       = false;
         continue_conversation_ = false;
         speech_active_         = false;
+        wake_sound_pending_    = false;
         Unduck();
         lva::tr::Show(lva::tr::LedState::Idle);
     }

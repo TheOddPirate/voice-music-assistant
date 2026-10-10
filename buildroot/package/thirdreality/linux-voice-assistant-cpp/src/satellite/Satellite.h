@@ -35,6 +35,8 @@ class Satellite {
 
     void OnTapPressed();
     bool AbortSpeechIfSpeaking();
+    void PrepareForMediaAnnouncement();
+    bool OwnsAnnouncePlayback() const;
 
     bool HandleMessage(std::uint32_t msg_type_id,
                        const ::google::protobuf::MessageLite& msg);
@@ -92,6 +94,7 @@ class Satellite {
     std::atomic<bool> pipeline_active_{false};
     std::atomic<bool> continue_conversation_{false};
     std::atomic<bool> speech_active_{false};
+    std::atomic<bool> wake_sound_pending_{false};
     std::atomic<bool> tap_started_during_speech_{false};
     std::atomic<bool> tap_down_pending_{false};
     std::string tts_url_;

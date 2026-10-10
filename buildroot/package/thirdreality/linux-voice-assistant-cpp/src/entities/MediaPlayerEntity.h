@@ -30,6 +30,7 @@ class MediaPlayerEntity final : public Entity {
     enum class PlayState { kIdle, kPlaying, kPaused };
     void EmitState(const ResponseSink& sink) const;
     void OnPlayerStateChanged(lva::audio::PlayerState s);
+    lva::audio::IAudioPlayer* CommandPlayer() const;
 
     lva::state::ServerState&  state_;
     lva::audio::IAudioPlayer* player_;     // not owned

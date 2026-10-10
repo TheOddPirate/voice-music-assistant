@@ -10,9 +10,8 @@ namespace lva::tr {
 //
 // Socket path: /tmp/sendspin-control.sock
 
-void SendspinPlay();
+void SendspinMusicToggle();
 void SendspinPause();
-void SendspinRequestState();
 
 // Toggle the sendspin LED effect.
 void SendspinLedToggle();

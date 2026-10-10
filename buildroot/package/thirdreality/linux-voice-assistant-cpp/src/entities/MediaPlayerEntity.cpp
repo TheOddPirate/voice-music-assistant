@@ -5,6 +5,7 @@
 #include "audio/LibMpvPlayer.h"
 #include "audio/WebRtcProcessor.h"
 #include "protocol/MessageRegistry.h"
+#include "satellite/Satellite.h"
 #include "state/ServerState.h"
 #include "util/Log.h"
 
@@ -108,16 +109,49 @@ void MediaPlayerEntity::OnPlayerStateChanged(lva::audio::PlayerState s) {
 }
 
 bool MediaPlayerEntity::IsPlaying() const {
-    if (player_ == nullptr) return false;
-    const auto state = player_->State();
-    return state == lva::audio::PlayerState::kLoading ||
-           state == lva::audio::PlayerState::kPlaying;
+    const auto is_playing = [](lva::audio::IAudioPlayer* player) {
+        if (player == nullptr) return false;
+        const auto state = player->State();
+        return state == lva::audio::PlayerState::kLoading ||
+               state == lva::audio::PlayerState::kPlaying;
+    };
+    if (is_playing(player_)) return true;
+    auto* command_player = CommandPlayer();
+    return command_player != player_ && is_playing(command_player);
+}
+
+lva::audio::IAudioPlayer* MediaPlayerEntity::CommandPlayer() const {
+    auto* announce = state_.announce_player;
+    if (announce != nullptr) {
+        const auto announce_state = announce->State();
+        const bool announce_active =
+            announce_state == lva::audio::PlayerState::kLoading ||
+            announce_state == lva::audio::PlayerState::kPlaying ||
+            announce_state == lva::audio::PlayerState::kPaused;
+        const bool satellite_owns_announce =
+            state_.satellite != nullptr &&
+            state_.satellite->OwnsAnnouncePlayback();
+        if (announce_active && !satellite_owns_announce) return announce;
+    }
+    return player_;
 }
 
 void MediaPlayerEntity::PausePlayback() {
-    if (!IsPlaying()) return;
-    player_->Pause();
-    OnPlayerStateChanged(player_->State());
+    const auto is_playing = [](lva::audio::IAudioPlayer* player) {
+        if (player == nullptr) return false;
+        const auto state = player->State();
+        return state == lva::audio::PlayerState::kLoading ||
+               state == lva::audio::PlayerState::kPlaying;
+    };
+    auto* command_player = CommandPlayer();
+    if (is_playing(player_)) player_->Pause();
+    if (command_player != player_ && is_playing(command_player)) {
+        command_player->Pause();
+    }
+    const auto state = command_player != nullptr
+        ? command_player->State()
+        : lva::audio::PlayerState::kIdle;
+    OnPlayerStateChanged(state);
 }
 
 void MediaPlayerEntity::BroadcastState() {
@@ -204,24 +238,30 @@ void MediaPlayerEntity::OnCommand(
     if (cmd.has_command()) {
         const auto command = cmd.command();
         switch (command) {
-            case ::MEDIA_PLAYER_COMMAND_PLAY:
+            case ::MEDIA_PLAYER_COMMAND_PLAY: {
                 LVA_LOGI(kTag, "command: PLAY (resume)");
-                if (player_ != nullptr) player_->Resume();
+                auto* command_player = CommandPlayer();
+                if (command_player != nullptr) command_player->Resume();
                 play_state_ = PlayState::kPlaying;
                 state_changed = true;
                 break;
-            case ::MEDIA_PLAYER_COMMAND_PAUSE:
+            }
+            case ::MEDIA_PLAYER_COMMAND_PAUSE: {
                 LVA_LOGI(kTag, "command: PAUSE");
-                if (player_ != nullptr) player_->Pause();
+                auto* command_player = CommandPlayer();
+                if (command_player != nullptr) command_player->Pause();
                 play_state_ = PlayState::kPaused;
                 state_changed = true;
                 break;
-            case ::MEDIA_PLAYER_COMMAND_STOP:
+            }
+            case ::MEDIA_PLAYER_COMMAND_STOP: {
                 LVA_LOGI(kTag, "command: STOP");
-                if (player_ != nullptr) player_->Stop();
+                auto* command_player = CommandPlayer();
+                if (command_player != nullptr) command_player->Stop();
                 play_state_ = PlayState::kIdle;
                 state_changed = true;
                 break;
+            }
             case ::MEDIA_PLAYER_COMMAND_MUTE:
                 if (!muted_) {
                     pre_mute_volume_ = state_.volume.load(
@@ -258,6 +298,9 @@ void MediaPlayerEntity::OnCommand(
             announcement && state_.announce_player != nullptr
                 ? state_.announce_player
                 : player_;
+        if (announcement && state_.satellite != nullptr) {
+            state_.satellite->PrepareForMediaAnnouncement();
+        }
         if (target != nullptr) {
             target->Play(cmd.media_url());
         }

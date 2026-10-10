@@ -42,9 +42,8 @@ void SendCommand(const char* cmd) {
 
 }  // namespace
 
-void SendspinPlay()        { SendCommand("PLAY"); }
+void SendspinMusicToggle() { SendCommand("MUSIC_TOGGLE"); }
 void SendspinPause()       { SendCommand("PAUSE"); }
-void SendspinRequestState() { SendCommand("STATE_REQUEST"); }
 void SendspinLedToggle()   { SendCommand("LED_TOGGLE"); }
 void SendspinDuck()        { SendCommand("DUCK"); }
 void SendspinUnduck()      { SendCommand("UNDUCK"); }

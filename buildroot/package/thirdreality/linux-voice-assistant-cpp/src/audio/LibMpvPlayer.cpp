@@ -221,6 +221,11 @@ void LibMpvPlayer::Play(const std::string& url,
         done_callback_ = nullptr;
         return;
     }
+    int no = 0;
+    if (const int rc = mpv_set_property(mpv_, "pause", MPV_FORMAT_FLAG, &no);
+        rc < 0) {
+        LVA_LOGW(kTag, "clear pause failed: %s", mpv_error_string(rc));
+    }
     state_.store(PlayerState::kLoading, std::memory_order_relaxed);
     LVA_LOGI(kTag, "Play: %s", url.c_str());
 }

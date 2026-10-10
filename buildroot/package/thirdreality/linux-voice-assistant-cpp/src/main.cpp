@@ -903,40 +903,37 @@ int main(int argc, char** argv) {
         LVA_LOGW(kTag, "timerfd_create failed; satellite ticks disabled");
     }
 
-    std::atomic<bool> sendspin_playing{false};
+    bool tap_playback_pending = false;
+    bool tap_ha_was_playing = false;
 
     // Button control socket: tr-buttond owns /dev/input/event0 and forwards
     // tap/home gestures here over a Unix datagram socket. lva no longer reads
     // the input device.
     auto control_listener = std::make_unique<lva::tr::ControlListener>(
         [&state, home_button_entity, &satellite,
-         &sendspin_playing](const std::string& cmd) {
+         &tap_playback_pending, &tap_ha_was_playing](const std::string& cmd) {
             if (cmd == "TAP_DOWN") {
                 if (satellite) satellite->OnTapPressed();
-            } else if (cmd == "TAP") {
-                if (satellite && satellite->AbortSpeechIfSpeaking()) return;
-
-                const bool sendspin_was_playing =
-                    sendspin_playing.load(std::memory_order_acquire);
-                const bool ha_was_playing =
+                tap_ha_was_playing =
                     state.media_player_entity != nullptr &&
                     state.media_player_entity->IsPlaying();
+                tap_playback_pending = true;
+            } else if (cmd == "TAP") {
+                const bool tap_down_seen = tap_playback_pending;
+                tap_playback_pending = false;
+                const bool ha_was_playing = tap_down_seen
+                    ? tap_ha_was_playing
+                    : state.media_player_entity != nullptr &&
+                          state.media_player_entity->IsPlaying();
 
-                if (sendspin_was_playing) {
-                    lva::tr::SendspinPause();
-                    sendspin_playing.store(false, std::memory_order_release);
-                }
+                if (satellite && satellite->AbortSpeechIfSpeaking()) return;
+
                 if (ha_was_playing) {
+                    lva::tr::SendspinPause();
                     state.media_player_entity->PausePlayback();
+                } else {
+                    lva::tr::SendspinMusicToggle();
                 }
-                if (!sendspin_was_playing && !ha_was_playing) {
-                    lva::tr::SendspinPlay();
-                    sendspin_playing.store(true, std::memory_order_release);
-                }
-            } else if (cmd == "SENDSPIN_STATE_PLAYING") {
-                sendspin_playing.store(true, std::memory_order_release);
-            } else if (cmd == "SENDSPIN_STATE_STOPPED") {
-                sendspin_playing.store(false, std::memory_order_release);
             } else if (cmd == "HOME_SINGLE" || cmd == "HOME_DOUBLE" ||
                        cmd == "HOME_TRIPLE") {
                 if (home_button_entity == nullptr || !state.broadcast) return;
@@ -952,7 +949,6 @@ int main(int argc, char** argv) {
             server.AddAuxFd(ctl_fd, [&control_listener] {
                 control_listener->OnReadable();
             });
-            lva::tr::SendspinRequestState();
         } else {
             LVA_LOGW(kTag, "button control listener disabled");
         }
