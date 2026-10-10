@@ -45,6 +45,24 @@ static std::atomic<bool> g_running{true};
 static std::atomic<bool> g_ducked{false};
 static void signal_handler(int) { g_running = false; }
 
+static constexpr const char *LVA_CONTROL_PATH = "/tmp/lva-control.sock";
+
+static void publish_playback_state(SendspinPlaybackState state) {
+  int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+  if (fd < 0) return;
+
+  struct sockaddr_un addr{};
+  addr.sun_family = AF_UNIX;
+  strncpy(addr.sun_path, LVA_CONTROL_PATH, sizeof(addr.sun_path) - 1);
+
+  const char *message = state == SendspinPlaybackState::PLAYING
+                            ? "SENDSPIN_STATE_PLAYING"
+                            : "SENDSPIN_STATE_STOPPED";
+  sendto(fd, message, strlen(message), MSG_NOSIGNAL,
+         reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr));
+  close(fd);
+}
+
 // ============================================================================
 // Control socket — receives tap commands from lva over a Unix domain
 // datagram socket. lva owns the tap key; this process no longer reads the
@@ -820,6 +838,7 @@ class MainClientListener : public SendspinClientListener {
       auto state = *group.playback_state;
       fprintf(stderr, "[sendspin] group playback: %s\n",
               state == SendspinPlaybackState::PLAYING ? "playing" : "stopped");
+      publish_playback_state(state);
       if (state == SendspinPlaybackState::STOPPED && led_) led_->clear();
       else if (state == SendspinPlaybackState::PLAYING && led_) led_->resume();
     }
@@ -948,6 +967,10 @@ int main(int argc, char *argv[]) {
   if (!control.open()) {
     fprintf(stderr, "[sendspin] control socket unavailable; "
                     "tap commands disabled\n");
+  } else {
+    publish_playback_state(
+        client.get_group_state().playback_state.value_or(
+            SendspinPlaybackState::STOPPED));
   }
 
   int poll_count = 0;
@@ -962,6 +985,14 @@ int main(int argc, char *argv[]) {
           controller.send_command({.command = SendspinControllerCommand::PAUSE});
         else
           controller.send_command({.command = SendspinControllerCommand::PLAY});
+      } else if (strcmp(cmd, "PLAY") == 0) {
+        controller.send_command({.command = SendspinControllerCommand::PLAY});
+      } else if (strcmp(cmd, "PAUSE") == 0) {
+        controller.send_command({.command = SendspinControllerCommand::PAUSE});
+      } else if (strcmp(cmd, "STATE_REQUEST") == 0) {
+        publish_playback_state(
+            client.get_group_state().playback_state.value_or(
+                SendspinPlaybackState::STOPPED));
       } else if (strcmp(cmd, "LED_TOGGLE") == 0) {
         led_ctrl.toggle_enabled();
       } else if (strcmp(cmd, "DUCK") == 0) {

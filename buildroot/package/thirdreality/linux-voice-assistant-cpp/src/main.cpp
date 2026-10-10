@@ -903,14 +903,40 @@ int main(int argc, char** argv) {
         LVA_LOGW(kTag, "timerfd_create failed; satellite ticks disabled");
     }
 
+    std::atomic<bool> sendspin_playing{false};
+
     // Button control socket: tr-buttond owns /dev/input/event0 and forwards
     // tap/home gestures here over a Unix datagram socket. lva no longer reads
     // the input device.
     auto control_listener = std::make_unique<lva::tr::ControlListener>(
-        [&state, home_button_entity, &satellite](const std::string& cmd) {
-            if (cmd == "TAP") {
+        [&state, home_button_entity, &satellite,
+         &sendspin_playing](const std::string& cmd) {
+            if (cmd == "TAP_DOWN") {
+                if (satellite) satellite->OnTapPressed();
+            } else if (cmd == "TAP") {
                 if (satellite && satellite->AbortSpeechIfSpeaking()) return;
-                lva::tr::SendspinMusicToggle();
+
+                const bool sendspin_was_playing =
+                    sendspin_playing.load(std::memory_order_acquire);
+                const bool ha_was_playing =
+                    state.media_player_entity != nullptr &&
+                    state.media_player_entity->IsPlaying();
+
+                if (sendspin_was_playing) {
+                    lva::tr::SendspinPause();
+                    sendspin_playing.store(false, std::memory_order_release);
+                }
+                if (ha_was_playing) {
+                    state.media_player_entity->PausePlayback();
+                }
+                if (!sendspin_was_playing && !ha_was_playing) {
+                    lva::tr::SendspinPlay();
+                    sendspin_playing.store(true, std::memory_order_release);
+                }
+            } else if (cmd == "SENDSPIN_STATE_PLAYING") {
+                sendspin_playing.store(true, std::memory_order_release);
+            } else if (cmd == "SENDSPIN_STATE_STOPPED") {
+                sendspin_playing.store(false, std::memory_order_release);
             } else if (cmd == "HOME_SINGLE" || cmd == "HOME_DOUBLE" ||
                        cmd == "HOME_TRIPLE") {
                 if (home_button_entity == nullptr || !state.broadcast) return;
@@ -926,6 +952,7 @@ int main(int argc, char** argv) {
             server.AddAuxFd(ctl_fd, [&control_listener] {
                 control_listener->OnReadable();
             });
+            lva::tr::SendspinRequestState();
         } else {
             LVA_LOGW(kTag, "button control listener disabled");
         }

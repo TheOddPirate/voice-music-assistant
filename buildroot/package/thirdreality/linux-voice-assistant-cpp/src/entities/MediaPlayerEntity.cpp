@@ -81,19 +81,23 @@ void MediaPlayerEntity::OnPlayerStateChanged(lva::audio::PlayerState s) {
         state_.webrtc_processor->SetFarEndActive(far_end);
     }
 
-    PlayState new_local;
-    switch (s) {
-        case lva::audio::PlayerState::kIdle:
-        case lva::audio::PlayerState::kError:
-            new_local = PlayState::kIdle;
-            break;
-        case lva::audio::PlayerState::kLoading:
-        case lva::audio::PlayerState::kPlaying:
-            new_local = PlayState::kPlaying;
-            break;
-        case lva::audio::PlayerState::kPaused:
-            new_local = PlayState::kPaused;
-            break;
+    const auto music_state = state_.music_player != nullptr
+        ? state_.music_player->State()
+        : lva::audio::PlayerState::kIdle;
+    const auto announce_state = state_.announce_player != nullptr
+        ? state_.announce_player->State()
+        : lva::audio::PlayerState::kIdle;
+    const auto is_playing = [](lva::audio::PlayerState state) {
+        return state == lva::audio::PlayerState::kLoading ||
+               state == lva::audio::PlayerState::kPlaying;
+    };
+
+    PlayState new_local = PlayState::kIdle;
+    if (is_playing(music_state) || is_playing(announce_state)) {
+        new_local = PlayState::kPlaying;
+    } else if (music_state == lva::audio::PlayerState::kPaused ||
+               announce_state == lva::audio::PlayerState::kPaused) {
+        new_local = PlayState::kPaused;
     }
     if (new_local == play_state_) {
         return;  // no-op, don't spam HA
@@ -101,6 +105,19 @@ void MediaPlayerEntity::OnPlayerStateChanged(lva::audio::PlayerState s) {
     play_state_ = new_local;
 
     BroadcastState();
+}
+
+bool MediaPlayerEntity::IsPlaying() const {
+    if (player_ == nullptr) return false;
+    const auto state = player_->State();
+    return state == lva::audio::PlayerState::kLoading ||
+           state == lva::audio::PlayerState::kPlaying;
+}
+
+void MediaPlayerEntity::PausePlayback() {
+    if (!IsPlaying()) return;
+    player_->Pause();
+    OnPlayerStateChanged(player_->State());
 }
 
 void MediaPlayerEntity::BroadcastState() {

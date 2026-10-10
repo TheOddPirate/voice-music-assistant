@@ -33,10 +33,7 @@ class Satellite {
     // Called when the stop word fires. Stops TTS / timer ring.
     void OnStopDetected();
 
-    // Abort an in-progress spoken response (TTS / announcement) the same way
-    // the stop word does, without opening the mic. Returns true if speech
-    // was playing and was aborted, false otherwise (idle / listening / music
-    // playing), so the caller can fall back to normal tap handling.
+    void OnTapPressed();
     bool AbortSpeechIfSpeaking();
 
     bool HandleMessage(std::uint32_t msg_type_id,
@@ -62,6 +59,7 @@ class Satellite {
     void OnVoiceEvent(int event_type,
                       const std::vector<std::pair<std::string, std::string>>& data);
     void PlayTts();
+    void FinishSpeech(bool success);
     void PlayAnnounce(const std::string& media_id,
                       const std::string& preannounce_media_id,
                       bool start_conversation);
@@ -93,6 +91,9 @@ class Satellite {
     std::atomic<bool> is_streaming_audio_{false};
     std::atomic<bool> pipeline_active_{false};
     std::atomic<bool> continue_conversation_{false};
+    std::atomic<bool> speech_active_{false};
+    std::atomic<bool> tap_started_during_speech_{false};
+    std::atomic<bool> tap_down_pending_{false};
     std::string tts_url_;
     bool   tts_played_         = false;
 

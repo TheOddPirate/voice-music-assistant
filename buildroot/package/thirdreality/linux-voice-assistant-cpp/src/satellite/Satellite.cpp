@@ -84,36 +84,58 @@ void Satellite::OnStopDetected() {
         StopTimerRing();
     } else if (announce_player_) {
         LVA_LOGI(kTag, "stop word → stopping TTS");
-        announce_player_->Stop();
-        pipeline_active_       = false;
         continue_conversation_ = false;
         continue_listen_at_ns_.store(0, std::memory_order_relaxed);
-        Unduck();
-        lva::tr::Show(lva::tr::LedState::Idle);
+        announce_player_->Stop();
+        if (speech_active_) {
+            FinishSpeech(false);
+        } else {
+            pipeline_active_ = false;
+            Unduck();
+            lva::tr::Show(lva::tr::LedState::Idle);
+        }
     }
 }
 
+void Satellite::OnTapPressed() {
+    tap_started_during_speech_.store(speech_active_,
+                                     std::memory_order_release);
+    tap_down_pending_.store(true, std::memory_order_release);
+}
+
 bool Satellite::AbortSpeechIfSpeaking() {
-    if (announce_player_ == nullptr) return false;
+    const bool tap_down_seen =
+        tap_down_pending_.exchange(false, std::memory_order_acq_rel);
+    const bool started_during_speech = tap_down_seen
+        ? tap_started_during_speech_.exchange(false,
+                                               std::memory_order_acq_rel)
+        : speech_active_.load(std::memory_order_acquire);
+    if (!started_during_speech) {
+        return false;
+    }
+    if (!speech_active_) {
+        continue_conversation_ = false;
+        continue_listen_at_ns_.store(0, std::memory_order_relaxed);
+        if (is_streaming_audio_) {
+            StopAudioStreaming();
+            if (state_.broadcast) {
+                ::VoiceAssistantRequest req;
+                req.set_start(false);
+                state_.broadcast(lva::proto::kIdVoiceAssistantRequest, req);
+            }
+        }
+        pipeline_active_ = false;
+        Unduck();
+        lva::tr::Show(lva::tr::LedState::Idle);
+        return true;
+    }
+    if (announce_player_ == nullptr) return true;
 
-    const auto st = announce_player_->State();
-    const bool speaking = (st == lva::audio::PlayerState::kPlaying ||
-                           st == lva::audio::PlayerState::kLoading);
-    if (!speaking) return false;
-
-    LVA_LOGI(kTag, "tap during TTS → stopping speech");
-    announce_player_->Stop();
-    pipeline_active_       = false;
+    LVA_LOGI(kTag, "tap during speech → stopping speech");
     continue_conversation_ = false;
     continue_listen_at_ns_.store(0, std::memory_order_relaxed);
-    Unduck();
-    lva::tr::Show(lva::tr::LedState::Idle);
-
-    if (state_.broadcast) {
-        ::VoiceAssistantAnnounceFinished done;
-        state_.broadcast(lva::proto::kIdVoiceAssistantAnnounceFinished, done);
-    }
-
+    announce_player_->Stop();
+    FinishSpeech(false);
     return true;
 }
 
@@ -152,6 +174,7 @@ void Satellite::StartPipeline(const std::string& wake_word_phrase) {
     tts_url_.clear();
     tts_played_            = false;
     continue_conversation_ = false;
+    speech_active_         = false;
 
     lva::tr::Show(lva::tr::LedState::Listening);
     Duck();
@@ -257,33 +280,37 @@ void Satellite::PlayTts() {
     LVA_LOGI(kTag, "playing TTS: %s", tts_url_.c_str());
     lva::tr::Show(lva::tr::LedState::Speaking);
 
-    auto broadcast = state_.broadcast;
-    announce_player_->Play(tts_url_, [this, broadcast]() {
-        if (broadcast) {
-            ::VoiceAssistantAnnounceFinished done;
-            broadcast(lva::proto::kIdVoiceAssistantAnnounceFinished, done);
-        }
-        if (continue_conversation_) {
-            LVA_LOGI(kTag, "TTS done — continuing conversation after %lld ms",
-                     static_cast<long long>(
-                         state_.continue_conversation_delay_ns / 1'000'000));
-            // TTS has finished playing; show Thinking during the settle delay
-            // instead of leaving the LED on Speaking. BeginListening() will
-            // switch to Listening once the mic actually opens.
-            lva::tr::Show(lva::tr::LedState::Thinking);
-            const auto now_ns =
-                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now().time_since_epoch())
-                    .count();
-            continue_listen_at_ns_.store(
-                now_ns + state_.continue_conversation_delay_ns,
-                std::memory_order_release);
-        } else {
-            pipeline_active_ = false;
-            lva::tr::Show(lva::tr::LedState::Idle);
-            Unduck();
-        }
+    if (timer_ringing_) StopTimerRing();
+    speech_active_ = true;
+    announce_player_->Play(tts_url_, [this]() {
+        FinishSpeech(false);
     });
+}
+
+void Satellite::FinishSpeech(bool success) {
+    if (!speech_active_.exchange(false, std::memory_order_acq_rel)) return;
+
+    if (state_.broadcast) {
+        ::VoiceAssistantAnnounceFinished done;
+        done.set_success(success);
+        state_.broadcast(lva::proto::kIdVoiceAssistantAnnounceFinished, done);
+    }
+    if (continue_conversation_) {
+        LVA_LOGI(kTag, "speech done — continuing conversation after %lld ms",
+                 static_cast<long long>(
+                     state_.continue_conversation_delay_ns / 1'000'000));
+        lva::tr::Show(lva::tr::LedState::Thinking);
+        const auto now_ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+        continue_listen_at_ns_.store(
+            now_ns + state_.continue_conversation_delay_ns,
+            std::memory_order_release);
+    } else {
+        pipeline_active_ = false;
+        lva::tr::Show(lva::tr::LedState::Idle);
+        Unduck();
+    }
 }
 
 void Satellite::PlayAnnounce(const std::string& media_id,
@@ -292,39 +319,15 @@ void Satellite::PlayAnnounce(const std::string& media_id,
     if (announce_player_ == nullptr) return;
     if (media_id.empty()) return;
 
+    if (timer_ringing_) StopTimerRing();
     pipeline_active_ = true;
     Duck();
     continue_conversation_ = start_conversation;
 
-    auto broadcast = state_.broadcast;
-    auto play_main = [this, media_id, broadcast]() {
-        announce_player_->Play(media_id, [this, broadcast]() {
-            if (broadcast) {
-                ::VoiceAssistantAnnounceFinished done;
-                done.set_success(true);
-                broadcast(lva::proto::kIdVoiceAssistantAnnounceFinished, done);
-            }
-            if (continue_conversation_) {
-                LVA_LOGI(kTag, "announce done — continuing conversation "
-                               "after %lld ms",
-                         static_cast<long long>(
-                             state_.continue_conversation_delay_ns
-                             / 1'000'000));
-                // Show Thinking during the settle delay; BeginListening()
-                // switches to Listening when the mic opens.
-                lva::tr::Show(lva::tr::LedState::Thinking);
-                const auto now_ns =
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        std::chrono::steady_clock::now().time_since_epoch())
-                        .count();
-                continue_listen_at_ns_.store(
-                    now_ns + state_.continue_conversation_delay_ns,
-                    std::memory_order_release);
-            } else {
-                pipeline_active_ = false;
-                lva::tr::Show(lva::tr::LedState::Idle);
-                Unduck();
-            }
+    speech_active_ = true;
+    auto play_main = [this, media_id]() {
+        announce_player_->Play(media_id, [this]() {
+            FinishSpeech(true);
         });
     };
 
@@ -357,6 +360,12 @@ void Satellite::Unduck() {
 
 void Satellite::StartTimerRing() {
     if (timer_ringing_) return;  // already ringing
+    if (speech_active_ && announce_player_ != nullptr) {
+        continue_conversation_ = false;
+        continue_listen_at_ns_.store(0, std::memory_order_relaxed);
+        announce_player_->Stop();
+        FinishSpeech(false);
+    }
     timer_ringing_    = true;
     timer_ring_start_ = std::chrono::steady_clock::now();
     if (announce_player_ != nullptr) {
@@ -537,6 +546,7 @@ void Satellite::OnDisconnected() {
     StopTimerRing();
     pipeline_active_       = false;
     continue_conversation_ = false;
+    speech_active_         = false;
     continue_listen_at_ns_.store(0, std::memory_order_relaxed);
     Unduck();
     lva::tr::Show(lva::tr::LedState::Idle);
@@ -553,6 +563,7 @@ void Satellite::OnMuted() {
         announce_player_->Stop();
         pipeline_active_       = false;
         continue_conversation_ = false;
+        speech_active_         = false;
         Unduck();
         lva::tr::Show(lva::tr::LedState::Idle);
     }

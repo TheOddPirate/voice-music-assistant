@@ -287,7 +287,12 @@ void HandleKey(const struct input_event& ev, int64_t now_ms,
         case kKeyTap:
         case kKeyHome: {
             GestureKey& g = (code == kKeyTap) ? tap_key : home_key;
-            if (down) g.OnDown(now_ms); else g.OnUp(now_ms);
+            if (down) {
+                if (code == kKeyTap) SendTo(kLvaSocket, "TAP_DOWN");
+                g.OnDown(now_ms);
+            } else {
+                g.OnUp(now_ms);
+            }
             break;
         }
         case kKeyVolup:

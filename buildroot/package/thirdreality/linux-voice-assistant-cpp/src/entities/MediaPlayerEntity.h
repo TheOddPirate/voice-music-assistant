@@ -23,6 +23,8 @@ class MediaPlayerEntity final : public Entity {
                    const ResponseSink& sink) override;
 
     void BroadcastState();
+    bool IsPlaying() const;
+    void PausePlayback();
 
    private:
     enum class PlayState { kIdle, kPlaying, kPaused };
