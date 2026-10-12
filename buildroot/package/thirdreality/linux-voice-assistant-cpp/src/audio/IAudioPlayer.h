@@ -28,7 +28,7 @@ class IAudioPlayer {
     // Stop playback and clear the playlist. Safe to call when idle.
     virtual void Stop() = 0;
 
-    virtual void SetVolume(double normalized) = 0;
+    virtual void SetGain(double normalized) = 0;
 
     // Current high-level state.
     virtual PlayerState State() const = 0;

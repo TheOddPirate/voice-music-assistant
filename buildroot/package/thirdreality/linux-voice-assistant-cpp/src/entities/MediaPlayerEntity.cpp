@@ -31,8 +31,6 @@ MediaPlayerEntity::MediaPlayerEntity(std::uint32_t key,
     : Entity(key, kObjectId, kDisplayName), state_(state), player_(player) {
     pre_mute_volume_ = state_.volume.load(std::memory_order_relaxed);
     if (player_ != nullptr) {
-        player_->SetVolume(pre_mute_volume_);
-
         auto* mpv = dynamic_cast<lva::audio::LibMpvPlayer*>(player_);
         if (mpv != nullptr) {
             mpv->SetStateChangedCallback(
@@ -226,9 +224,6 @@ void MediaPlayerEntity::OnCommand(
                                     0.0, 1.0);
         LVA_LOGI(kTag, "command: volume -> %.3f", v);
         state_.PersistVolume(v);
-        if (player_ != nullptr) {
-            player_->SetVolume(v);
-        }
         if (!muted_) {
             pre_mute_volume_ = v;
         }
@@ -267,7 +262,6 @@ void MediaPlayerEntity::OnCommand(
                     pre_mute_volume_ = state_.volume.load(
                         std::memory_order_relaxed);
                     state_.PersistVolume(0.0);
-                    if (player_ != nullptr) player_->SetVolume(0.0);
                     muted_ = true;
                     state_changed = true;
                 }
@@ -276,7 +270,6 @@ void MediaPlayerEntity::OnCommand(
             case ::MEDIA_PLAYER_COMMAND_UNMUTE:
                 if (muted_) {
                     state_.PersistVolume(pre_mute_volume_);
-                    if (player_ != nullptr) player_->SetVolume(pre_mute_volume_);
                     muted_ = false;
                     state_changed = true;
                 }

@@ -33,7 +33,7 @@ class LibMpvPlayer final : public IAudioPlayer {
     void        Pause()  override;
     void        Resume() override;
     void        Stop()   override;
-    void        SetVolume(double normalized) override;
+    void        SetGain(double normalized) override;
     PlayerState State() const override;
 
     int  WakeupFd() const noexcept { return wakeup_read_fd_; }

@@ -23,7 +23,10 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <cmath>
+#include <cerrno>
+#include <cctype>
+#include <cstddef>
+#include <climits>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -34,7 +37,11 @@
 #include <string>
 #include <thread>
 
+#include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
+#include <sys/file.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -102,6 +109,8 @@ class ControlSocket {
 };
 
 static constexpr const char *SOUND_CONF = "/data/conf/sound.json";
+static constexpr const char *LVA_CONTROL_PATH = "/tmp/lva-control.sock";
+static constexpr const char *SOUND_LOCK_PATH = "/tmp/sound_config.lock";
 static constexpr const char *SENDSPIN_CONF = "/data/conf/sendspin.json";
 
 // ============================================================================
@@ -118,27 +127,68 @@ static int read_json_int(const char *path, const char *field) {
   if (pos == std::string::npos) return -1;
   pos = content.find(':', pos);
   if (pos == std::string::npos) return -1;
-  return std::atoi(content.c_str() + pos + 1);
+  const char *start = content.c_str() + pos + 1;
+  while (*start == ' ' || *start == '\t' || *start == '\r' ||
+         *start == '\n') {
+    ++start;
+  }
+  errno = 0;
+  char *end = nullptr;
+  const long value = std::strtol(start, &end, 10);
+  if (end == start || errno == ERANGE || value < INT_MIN || value > INT_MAX) {
+    return -1;
+  }
+  while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+    ++end;
+  }
+  if (*end != ',' && *end != '}') return -1;
+  return static_cast<int>(value);
 }
 
-static void write_json_int(const char *path, const char *field, int value) {
+class ScopedSoundLock {
+ public:
+  explicit ScopedSoundLock(bool required) {
+    if (!required) return;
+    fd_ = ::open(SOUND_LOCK_PATH, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+    if (fd_ >= 0 && ::flock(fd_, LOCK_EX) != 0) {
+      ::close(fd_);
+      fd_ = -1;
+    }
+  }
+
+  ~ScopedSoundLock() {
+    if (fd_ < 0) return;
+    ::flock(fd_, LOCK_UN);
+    ::close(fd_);
+  }
+
+  bool locked() const { return fd_ >= 0; }
+
+ private:
+  int fd_{-1};
+};
+
+static bool write_json_int(const char *path, const char *field, int value) {
+  const bool is_sound_config = std::strcmp(path, SOUND_CONF) == 0;
+  ScopedSoundLock lock(is_sound_config);
+  if (is_sound_config && !lock.locked()) return false;
   std::ifstream in(path);
-  if (!in) return;
+  if (!in) return false;
   std::string content((std::istreambuf_iterator<char>(in)),
                       std::istreambuf_iterator<char>());
   in.close();
 
   std::string key = std::string("\"") + field + "\"";
   auto pos = content.find(key);
-  if (pos == std::string::npos) return;
+  if (pos == std::string::npos) return false;
   pos = content.find(':', pos);
-  if (pos == std::string::npos) return;
+  if (pos == std::string::npos) return false;
   pos++;
   while (pos < content.size() && (content[pos] == ' ' || content[pos] == '\t')) pos++;
   auto end = pos;
   if (end < content.size() && content[end] == '-') end++;
   while (end < content.size() && (content[end] >= '0' && content[end] <= '9')) end++;
-  if (end == pos) return;
+  if (end == pos) return false;
 
   char buf[16];
   snprintf(buf, sizeof(buf), "%d", value);
@@ -146,20 +196,81 @@ static void write_json_int(const char *path, const char *field, int value) {
 
   std::string tmp = std::string(path) + ".tmp";
   std::ofstream out(tmp, std::ios::trunc);
-  if (!out) return;
+  if (!out) return false;
   out << content;
   out.close();
-  rename(tmp.c_str(), path);
+  if (!out) {
+    ::unlink(tmp.c_str());
+    return false;
+  }
+  if (::rename(tmp.c_str(), path) != 0) {
+    ::unlink(tmp.c_str());
+    return false;
+  }
+  return true;
 }
 
 static int read_device_volume() {
   return read_json_int(SOUND_CONF, "volume");
 }
 
+static bool send_volume_to_lva(int volume) {
+  const int fd = ::socket(AF_UNIX,
+                          SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+  if (fd < 0) return false;
+
+  struct sockaddr_un local{};
+  local.sun_family = AF_UNIX;
+  local.sun_path[0] = '\0';
+  std::snprintf(local.sun_path + 1, sizeof(local.sun_path) - 1,
+                "sendspin-%ld-%d", static_cast<long>(::getpid()), fd);
+  const socklen_t local_len = static_cast<socklen_t>(
+      offsetof(struct sockaddr_un, sun_path) + 1 +
+      std::strlen(local.sun_path + 1));
+  if (::bind(fd, reinterpret_cast<struct sockaddr *>(&local), local_len) < 0) {
+    ::close(fd);
+    return false;
+  }
+
+  char command[32];
+  std::snprintf(command, sizeof(command), "CONFIG_SET_VOLUME:%d", volume);
+  struct sockaddr_un peer{};
+  peer.sun_family = AF_UNIX;
+  std::strncpy(peer.sun_path, LVA_CONTROL_PATH, sizeof(peer.sun_path) - 1);
+  if (::sendto(fd, command, std::strlen(command), MSG_NOSIGNAL,
+               reinterpret_cast<struct sockaddr *>(&peer),
+               sizeof(peer)) < 0) {
+    ::close(fd);
+    return false;
+  }
+
+  struct pollfd pfd{fd, POLLIN, 0};
+  const int result = ::poll(&pfd, 1, 100);
+  if (result <= 0 || !(pfd.revents & POLLIN)) {
+    ::close(fd);
+    return false;
+  }
+
+  char reply[8] = {};
+  const ssize_t n = ::recv(fd, reply, sizeof(reply) - 1, 0);
+  ::close(fd);
+  return n == 2 && std::memcmp(reply, "OK", 2) == 0;
+}
+
 static void persist_volume(int vol) {
   if (vol < 0) vol = 0;
   if (vol > 100) vol = 100;
-  write_json_int(SOUND_CONF, "volume", vol);
+  if (send_volume_to_lva(vol)) return;
+  if (!write_json_int(SOUND_CONF, "volume", vol)) {
+    fprintf(stderr, "[sendspin] failed to persist volume\n");
+    return;
+  }
+  char command[64];
+  std::snprintf(command, sizeof(command),
+                "/usr/bin/tr-volume set %d >/dev/null 2>&1", vol);
+  if (std::system(command) != 0) {
+    fprintf(stderr, "[sendspin] failed to apply fallback volume\n");
+  }
 }
 
 static int64_t now_us() {
@@ -230,36 +341,41 @@ class PulseVolumeController {
     ml_ = pa_threaded_mainloop_new();
     if (!ml_) return;
     ctx_ = pa_context_new(pa_threaded_mainloop_get_api(ml_), "sendspin-vol");
-    if (!ctx_) return;
-    pa_context_set_state_callback(ctx_, [](pa_context*, void*){}, nullptr);
-    pa_context_connect(ctx_, nullptr, PA_CONTEXT_NOFLAGS, nullptr);
-    pa_threaded_mainloop_start(ml_);
+    if (!ctx_) {
+      pa_threaded_mainloop_free(ml_);
+      ml_ = nullptr;
+      return;
+    }
+    if (pa_context_connect(ctx_, nullptr, PA_CONTEXT_NOFLAGS, nullptr) < 0) {
+      pa_context_unref(ctx_);
+      ctx_ = nullptr;
+      pa_threaded_mainloop_free(ml_);
+      ml_ = nullptr;
+      return;
+    }
+    if (pa_threaded_mainloop_start(ml_) < 0) {
+      pa_context_disconnect(ctx_);
+      pa_context_unref(ctx_);
+      ctx_ = nullptr;
+      pa_threaded_mainloop_free(ml_);
+      ml_ = nullptr;
+      return;
+    }
+    started_ = true;
   }
 
   ~PulseVolumeController() {
-    if (ml_) {
-      pa_threaded_mainloop_stop(ml_);
-      if (ctx_) { pa_context_disconnect(ctx_); pa_context_unref(ctx_); }
-      pa_threaded_mainloop_free(ml_);
+    if (!ml_) return;
+    if (started_) pa_threaded_mainloop_stop(ml_);
+    if (ctx_) {
+      pa_context_disconnect(ctx_);
+      pa_context_unref(ctx_);
     }
-  }
-
-  void set_volume_percent(int percent) {
-    if (!ctx_ || !ml_) return;
-    if (percent < 0) percent = 0;
-    if (percent > 100) percent = 100;
-    pa_threaded_mainloop_lock(ml_);
-    if (pa_context_get_state(ctx_) == PA_CONTEXT_READY) {
-      pa_cvolume vol;
-      pa_cvolume_set(&vol, 2, pa_sw_volume_from_linear(percent / 100.0));
-      auto *op = pa_context_set_sink_volume_by_name(ctx_, "@DEFAULT_SINK@", &vol, nullptr, nullptr);
-      if (op) pa_operation_unref(op);
-    }
-    pa_threaded_mainloop_unlock(ml_);
+    pa_threaded_mainloop_free(ml_);
   }
 
   void set_mute(bool muted) {
-    if (!ctx_ || !ml_) return;
+    if (!ctx_ || !ml_ || !started_) return;
     pa_threaded_mainloop_lock(ml_);
     if (pa_context_get_state(ctx_) == PA_CONTEXT_READY) {
       auto *op = pa_context_set_sink_mute_by_name(ctx_, "@DEFAULT_SINK@", muted ? 1 : 0, nullptr, nullptr);
@@ -271,6 +387,7 @@ class PulseVolumeController {
  private:
   pa_threaded_mainloop *ml_{nullptr};
   pa_context *ctx_{nullptr};
+  bool started_{false};
 };
 
 // ============================================================================
@@ -577,25 +694,11 @@ class PulsePlayerListener : public PlayerRoleListener {
     size_t aligned = length - (length % frame_size_);
     if (aligned == 0) return length;
 
-    // Software volume attenuation — mirrors MPV's internal volume behavior
-    // so that both paths produce consistent loudness at the same volume%.
-    // Uses square-root curve: gain = sqrt(vol/100) for a gentler rolloff.
-    {
+    if (g_ducked.load(std::memory_order_relaxed)) {
       auto *samples = reinterpret_cast<int16_t *>(data);
-      size_t count = aligned / sizeof(int16_t);
-      const int vol = last_volume_;
-      if (g_ducked.load(std::memory_order_relaxed)) {
-        // Duck: reduce to ~25% of current software volume
-        const int32_t gain = static_cast<int32_t>(
-            std::sqrt(vol / 100.0) * 0.25 * 256.0);
-        for (size_t i = 0; i < count; ++i)
-          samples[i] = static_cast<int16_t>((samples[i] * gain) >> 8);
-      } else if (vol < 100) {
-        const int32_t gain = static_cast<int32_t>(
-            std::sqrt(vol / 100.0) * 256.0);  // 50% → gain=181 (~71%)
-        for (size_t i = 0; i < count; ++i)
-          samples[i] = static_cast<int16_t>((samples[i] * gain) >> 8);
-      }
+      const size_t count = aligned / sizeof(int16_t);
+      for (size_t i = 0; i < count; ++i)
+        samples[i] = static_cast<int16_t>(samples[i] >> 2);
     }
 
     int err = 0;
@@ -642,7 +745,6 @@ class PulsePlayerListener : public PlayerRoleListener {
   void on_volume_changed(uint8_t volume_percent) override {
     int percent = std::min((int)volume_percent, 100);
     last_volume_ = percent;
-    if (vol_ctrl_) vol_ctrl_->set_volume_percent(percent);
     if (led_ctrl_) led_ctrl_->suppress(2000000);
     persist_volume(percent);
     fprintf(stderr, "[sendspin] volume: %d%%\n", percent);
@@ -903,6 +1005,10 @@ int main(int argc, char *argv[]) {
   player_listener.set_volume_controller(&vol_ctrl);
   player_listener.set_led_controller(&led_ctrl);
   player.set_listener(&player_listener);
+  const int initial_volume = read_device_volume();
+  if (initial_volume >= 0 && initial_volume <= 100) {
+    player.update_volume(static_cast<uint8_t>(initial_volume));
+  }
 
   // Metadata
   SimpleMetadataListener metadata_listener;

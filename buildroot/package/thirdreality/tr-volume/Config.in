@@ -1,0 +1,6 @@
+config BR2_PACKAGE_TR_VOLUME
+	bool "tr-volume"
+	depends on BR2_PACKAGE_PULSEAUDIO
+	help
+	  Apply the ThirdReality logical volume curve to the default
+	  PulseAudio sink.

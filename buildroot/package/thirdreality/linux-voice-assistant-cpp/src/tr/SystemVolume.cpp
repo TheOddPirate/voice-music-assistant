@@ -11,8 +11,6 @@
 #include <cstring>
 #include <string>
 
-#include <pulse/volume.h>
-
 #include "util/Log.h"
 
 extern char** environ;
@@ -23,10 +21,8 @@ namespace {
 
 constexpr const char* kTag = "trvol";
 
-void FormatPaVolume(int percent, char* buf, size_t buf_size) {
-    const double linear = std::clamp(percent, 0, 100) / 100.0;
-    const pa_volume_t pa_vol = pa_sw_volume_from_linear(linear);
-    std::snprintf(buf, buf_size, "%u", (unsigned)pa_vol);
+void FormatVolumePercent(int percent, char* buf, size_t buf_size) {
+    std::snprintf(buf, buf_size, "%d", std::clamp(percent, 0, 100));
 }
 
 }  // namespace
@@ -34,12 +30,11 @@ void FormatPaVolume(int percent, char* buf, size_t buf_size) {
 void SetSystemVolume(int percent) {
     const int clamped = std::clamp(percent, 0, 100);
     char arg_buf[16];
-    FormatPaVolume(clamped, arg_buf, sizeof(arg_buf));
+    FormatVolumePercent(clamped, arg_buf, sizeof(arg_buf));
 
-    char prog[]   = "/usr/bin/pactl";
-    char a1[]     = "set-sink-volume";
-    char a2[]     = "@DEFAULT_SINK@";
-    char* argv[]  = { prog, a1, a2, arg_buf, nullptr };
+    char prog[]   = "/usr/bin/tr-volume";
+    char a1[]     = "set";
+    char* argv[]  = { prog, a1, arg_buf, nullptr };
 
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
@@ -55,22 +50,20 @@ void SetSystemVolume(int percent) {
                                  argv, environ);
     posix_spawn_file_actions_destroy(&actions);
     if (rc != 0) {
-        LVA_LOGW(kTag, "pactl spawn failed: %s", std::strerror(rc));
+        LVA_LOGW(kTag, "tr-volume spawn failed: %s", std::strerror(rc));
         return;
     }
-    LVA_LOGI(kTag, "SetVolume %d%% -> pa_vol=%s (pid=%d)",
-             clamped, arg_buf, (int)pid);
+    LVA_LOGI(kTag, "SetVolume %d%% (pid=%d)", clamped, (int)pid);
 }
 
 void SetSystemVolumeSilent(int percent) {
     const int clamped = std::clamp(percent, 0, 100);
     char arg_buf[16];
-    FormatPaVolume(clamped, arg_buf, sizeof(arg_buf));
+    FormatVolumePercent(clamped, arg_buf, sizeof(arg_buf));
 
-    char prog[]   = "/usr/bin/pactl";
-    char a1[]     = "set-sink-volume";
-    char a2[]     = "@DEFAULT_SINK@";
-    char* argv[]  = { prog, a1, a2, arg_buf, nullptr };
+    char prog[]   = "/usr/bin/tr-volume";
+    char a1[]     = "set";
+    char* argv[]  = { prog, a1, arg_buf, nullptr };
 
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
@@ -86,11 +79,10 @@ void SetSystemVolumeSilent(int percent) {
                                  argv, environ);
     posix_spawn_file_actions_destroy(&actions);
     if (rc != 0) {
-        LVA_LOGW(kTag, "pactl spawn failed: %s", std::strerror(rc));
+        LVA_LOGW(kTag, "tr-volume spawn failed: %s", std::strerror(rc));
         return;
     }
-    LVA_LOGI(kTag, "SetVolumeSilent %d%% -> pa_vol=%s (pid=%d)",
-             clamped, arg_buf, (int)pid);
+    LVA_LOGI(kTag, "SetVolumeSilent %d%% (pid=%d)", clamped, (int)pid);
 }
 
 }  // namespace lva::tr

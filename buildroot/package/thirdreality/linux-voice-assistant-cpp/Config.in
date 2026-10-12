@@ -9,6 +9,7 @@ config BR2_PACKAGE_LINUX_VOICE_ASSISTANT_CPP
 	select BR2_PACKAGE_JSON_FOR_MODERN_CPP
 	select BR2_PACKAGE_MPV
 	select BR2_PACKAGE_PULSEAUDIO  # default audio output for libmpv
+	select BR2_PACKAGE_TR_VOLUME
 	select BR2_PACKAGE_WEBRTC_AUDIO_PROCESSING  # AGC + NS for the mic
 	default n
 	help

@@ -20,9 +20,9 @@
 //                                          MUSIC_TOGGLE
 //   Tap  double                         -> sendspin socket LED_TOGGLE
 //
-// System actions (volume / mute / factory-reset / wifi) stay in the shell
-// script /etc/adckey/adckey_function.sh, which is ThirdReality-owned. Only the
-// lva/sendspin semantic actions go over Unix datagram sockets.
+// Volume updates go to lva, the normal sound.json owner. If lva is
+// unavailable, the existing shell script remains the fallback. Factory reset
+// and Wi-Fi actions always stay in the ThirdReality-owned shell script.
 
 #include <dirent.h>
 #include <linux/input.h>
@@ -33,8 +33,11 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -47,6 +50,7 @@ constexpr const char* kInputDeviceName = "gpio_keypad";
 constexpr const char* kAdckeyScript   = "/etc/adckey/adckey_function.sh";
 constexpr const char* kLvaSocket      = "/tmp/lva-control.sock";
 constexpr const char* kSendspinSocket = "/tmp/sendspin-control.sock";
+constexpr const char* kSoundConfig    = "/data/conf/sound.json";
 
 // Key codes (see /etc/gpio_key.kl).
 constexpr int kKeyVoldown = 114;
@@ -104,6 +108,77 @@ int OpenInputDevice() {
     return found;
 }
 
+bool SendConfigToLva(const char* command) {
+    const int fd = ::socket(AF_UNIX,
+                            SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    if (fd < 0) return false;
+
+    struct sockaddr_un local{};
+    local.sun_family = AF_UNIX;
+    local.sun_path[0] = '\0';
+    std::snprintf(local.sun_path + 1, sizeof(local.sun_path) - 1,
+                  "tr-buttond-%ld-%d-%lld",
+                  static_cast<long>(::getpid()), fd,
+                  static_cast<long long>(NowMs()));
+    const socklen_t local_len = static_cast<socklen_t>(
+        offsetof(struct sockaddr_un, sun_path) + 1 +
+        std::strlen(local.sun_path + 1));
+    if (::bind(fd, reinterpret_cast<struct sockaddr*>(&local), local_len) < 0) {
+        ::close(fd);
+        return false;
+    }
+
+    struct sockaddr_un peer{};
+    peer.sun_family = AF_UNIX;
+    std::strncpy(peer.sun_path, kLvaSocket, sizeof(peer.sun_path) - 1);
+    if (::sendto(fd, command, std::strlen(command), MSG_NOSIGNAL,
+                 reinterpret_cast<struct sockaddr*>(&peer),
+                 sizeof(peer)) < 0) {
+        ::close(fd);
+        return false;
+    }
+
+    struct pollfd pfd{fd, POLLIN, 0};
+    const int result = ::poll(&pfd, 1, 100);
+    if (result <= 0 || !(pfd.revents & POLLIN)) {
+        ::close(fd);
+        return false;
+    }
+
+    char reply[8] = {};
+    const ssize_t n = ::recv(fd, reply, sizeof(reply) - 1, 0);
+    ::close(fd);
+    return n == 2 && std::memcmp(reply, "OK", 2) == 0;
+}
+
+int ReadSoundVolume() {
+    FILE* file = std::fopen(kSoundConfig, "r");
+    if (!file) return -1;
+    char line[256];
+    int volume = -1;
+    while (std::fgets(line, sizeof(line), file)) {
+        const char* key = std::strstr(line, "\"volume\"");
+        if (!key) continue;
+        const char* colon = std::strchr(key, ':');
+        if (colon && std::sscanf(colon + 1, "%d", &volume) == 1) break;
+    }
+    std::fclose(file);
+    return volume;
+}
+
+bool RunScriptCommand(const char* command) {
+    char shell_command[160];
+    std::snprintf(shell_command, sizeof(shell_command), "%s %s",
+                  kAdckeyScript, command);
+    const int rc = std::system(shell_command);
+    if (rc != 0) {
+        fprintf(stderr, "[buttond] '%s' exited with %d\n",
+                shell_command, rc);
+        return false;
+    }
+    return true;
+}
+
 // Run adckey_function.sh with one argument.
 //
 // Uses system() exactly like Amlogic's input_eventd did. This matters for
@@ -114,14 +189,27 @@ int OpenInputDevice() {
 // (factory_reset / change_wifi) are terminal actions, and the short-press
 // scripts return quickly.
 void RunScript(const char* arg) {
-    char cmd[128];
-    std::snprintf(cmd, sizeof(cmd), "%s %s", kAdckeyScript, arg);
-    const int rc = std::system(cmd);
-    if (rc != 0) {
-        fprintf(stderr, "[buttond] '%s' exited with %d\n", cmd, rc);
-    }
-}
+    if (std::strcmp(arg, "Volup") == 0 ||
+        std::strcmp(arg, "Voldown") == 0) {
+        const int current = ReadSoundVolume();
+        if (current >= 0) {
+            const int delta = std::strcmp(arg, "Volup") == 0 ? 10 : -10;
+            const int desired = std::max(0, std::min(100, current + delta));
+            char request[32];
+            std::snprintf(request, sizeof(request),
+                          "CONFIG_SET_VOLUME:%d", desired);
+            if (SendConfigToLva(request)) return;
 
+            char fallback[32];
+            std::snprintf(fallback, sizeof(fallback),
+                          "SetVolume %d", desired);
+            RunScriptCommand(fallback);
+            return;
+        }
+    }
+
+    RunScriptCommand(arg);
+}
 // Send a text command to a Unix datagram socket. Returns true on success.
 // Failure (e.g. ENOENT when the peer is not running) is expected and quiet.
 bool SendTo(const char* socket_path, const char* cmd) {

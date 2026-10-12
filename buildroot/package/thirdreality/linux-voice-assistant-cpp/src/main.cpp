@@ -20,6 +20,8 @@
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <limits>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -215,6 +217,24 @@ bool ParseCli(int argc, char** argv, CliOptions& out) {
         }
     }
     return true;
+}
+
+std::optional<int> ParseControlInteger(const std::string& command,
+                                       const char* prefix) {
+    const std::size_t prefix_len = std::strlen(prefix);
+    if (command.compare(0, prefix_len, prefix) != 0) return std::nullopt;
+
+    const char* start = command.c_str() + prefix_len;
+    if (*start == '\0') return std::nullopt;
+    errno = 0;
+    char* end = nullptr;
+    const long value = std::strtol(start, &end, 10);
+    if (end == start || *end != '\0' || errno == ERANGE ||
+        value < std::numeric_limits<int>::min() ||
+        value > std::numeric_limits<int>::max()) {
+        return std::nullopt;
+    }
+    return static_cast<int>(value);
 }
 
 std::string ReadMacFromDeviceJson(const std::filesystem::path& path) {
@@ -416,11 +436,6 @@ int main(int argc, char** argv) {
     state.webrtc_processor = webrtc_processor.get();
     state.announce_player  = announce_player.get();
     state.music_player     = music_player.get();
-
-    // Set initial volume on announce player to match music player.
-    if (state.preferences.volume.has_value()) {
-        announce_player->SetVolume(*state.preferences.volume);
-    }
 
     std::uint32_t next_key = 0;
 
@@ -918,7 +933,9 @@ int main(int argc, char** argv) {
                     state.media_player_entity != nullptr &&
                     state.media_player_entity->IsPlaying();
                 tap_playback_pending = true;
-            } else if (cmd == "TAP") {
+                return true;
+            }
+            if (cmd == "TAP") {
                 const bool tap_down_seen = tap_playback_pending;
                 tap_playback_pending = false;
                 const bool ha_was_playing = tap_down_seen
@@ -926,22 +943,35 @@ int main(int argc, char** argv) {
                     : state.media_player_entity != nullptr &&
                           state.media_player_entity->IsPlaying();
 
-                if (satellite && satellite->AbortSpeechIfSpeaking()) return;
-
+                if (satellite && satellite->AbortSpeechIfSpeaking()) {
+                    return true;
+                }
                 if (ha_was_playing) {
                     lva::tr::SendspinPause();
                     state.media_player_entity->PausePlayback();
                 } else {
                     lva::tr::SendspinMusicToggle();
                 }
-            } else if (cmd == "HOME_SINGLE" || cmd == "HOME_DOUBLE" ||
-                       cmd == "HOME_TRIPLE") {
-                if (home_button_entity == nullptr || !state.broadcast) return;
-                const char* event_type = (cmd == "HOME_SINGLE") ? "single_press"
-                                         : (cmd == "HOME_DOUBLE") ? "double_press"
-                                                                  : "triple_press";
-                home_button_entity->Trigger(event_type, state.broadcast);
+                return true;
             }
+            if (cmd == "HOME_SINGLE" || cmd == "HOME_DOUBLE" ||
+                cmd == "HOME_TRIPLE") {
+                if (home_button_entity != nullptr && state.broadcast) {
+                    const char* event_type =
+                        (cmd == "HOME_SINGLE") ? "single_press"
+                        : (cmd == "HOME_DOUBLE") ? "double_press"
+                                                 : "triple_press";
+                    home_button_entity->Trigger(event_type, state.broadcast);
+                }
+                return true;
+            }
+            if (const auto value =
+                    ParseControlInteger(cmd, "CONFIG_SET_VOLUME:")) {
+                if (*value < 0 || *value > 100) return false;
+                state.PersistVolume(static_cast<double>(*value) / 100.0);
+                return true;
+            }
+            return false;
         });
     {
         const int ctl_fd = control_listener->Start();

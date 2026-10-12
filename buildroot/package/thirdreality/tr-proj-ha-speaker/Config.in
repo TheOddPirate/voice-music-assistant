@@ -1,5 +1,7 @@
 config BR2_PACKAGE_TR_PROJ_HA_SPEAKER
     bool "thirdreality ha speaker project"
+    depends on BR2_PACKAGE_PULSEAUDIO
     default n
+    select BR2_PACKAGE_TR_VOLUME
     help
         enable thirdreality ha speaker project

@@ -11,5 +11,6 @@ TR_BUTTOND_VERSION = 1.0.0
 TR_BUTTOND_SITE = $(TOPDIR)/package/thirdreality/tr-buttond
 TR_BUTTOND_SITE_METHOD = local
 TR_BUTTOND_LICENSE = Apache-2.0
+TR_BUTTOND_DEPENDENCIES = tr-volume
 
 $(eval $(cmake-package))

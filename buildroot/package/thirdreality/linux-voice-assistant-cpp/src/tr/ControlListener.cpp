@@ -1,10 +1,12 @@
 #include "tr/ControlListener.h"
 
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
 #include <cerrno>
+#include <cstddef>
 #include <cstring>
 
 #include "util/Log.h"
@@ -32,7 +34,7 @@ int ControlListener::Start() {
         LVA_LOGE(kTag, "socket() failed: %s", std::strerror(errno));
         return -1;
     }
-    ::unlink(kSocketPath);  // clear a stale socket from a previous run
+    ::unlink(kSocketPath);
 
     struct sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
@@ -45,18 +47,38 @@ int ControlListener::Start() {
         fd_ = -1;
         return -1;
     }
+    if (::chmod(kSocketPath, 0600) != 0) {
+        LVA_LOGE(kTag, "chmod(%s) failed: %s", kSocketPath,
+                 std::strerror(errno));
+        ::close(fd_);
+        fd_ = -1;
+        ::unlink(kSocketPath);
+        return -1;
+    }
     LVA_LOGI(kTag, "listening on %s", kSocketPath);
     return fd_;
 }
 
 void ControlListener::OnReadable() {
     if (fd_ < 0) return;
-    char buf[64];
+    char buf[128];
     while (true) {
-        const ssize_t n = ::recv(fd_, buf, sizeof(buf) - 1, MSG_DONTWAIT);
+        struct sockaddr_un peer{};
+        socklen_t peer_len = sizeof(peer);
+        const ssize_t n = ::recvfrom(
+            fd_, buf, sizeof(buf) - 1, MSG_DONTWAIT,
+            reinterpret_cast<struct sockaddr*>(&peer), &peer_len);
         if (n <= 0) break;
         buf[n] = '\0';
-        if (on_command_) on_command_(buf);
+
+        const bool handled = on_command_ && on_command_(buf);
+        const socklen_t minimum_peer_len =
+            static_cast<socklen_t>(offsetof(struct sockaddr_un, sun_path) + 1);
+        if (peer_len >= minimum_peer_len) {
+            const char* reply = handled ? "OK" : "ERR";
+            ::sendto(fd_, reply, std::strlen(reply), MSG_NOSIGNAL,
+                     reinterpret_cast<struct sockaddr*>(&peer), peer_len);
+        }
     }
 }
 

@@ -63,9 +63,6 @@ do_volume_change() {
         vol=0
     fi
 
-    # PA sink volume is set by linux-voice-assistant-cpp (via SoundConfWatcher)
-    # using the perceptual curve. Do not set it here to avoid conflicts.
-
     echo "Volume $action (x${count}): $vol%"
 
     tmpfile=$(mktemp)
@@ -74,6 +71,8 @@ do_volume_change() {
 
     flock -u 200
     exec 200>&-
+
+    /usr/bin/tr-volume set "$vol" > /dev/null 2>&1
 
     dbus-send --system --type=signal /com/3r/EventBus com._3reality.EventBus.LedShow boolean:false array:string:'/usr/share/thirdreality/animation/volume-changed.animation'
 }
@@ -137,6 +136,8 @@ set_volume() {
 
     flock -u 200
     exec 200>&-
+
+    /usr/bin/tr-volume set "$vol" > /dev/null 2>&1
 
     echo "SetVolume: $vol%"
     dbus-send --system --type=signal /com/3r/EventBus com._3reality.EventBus.LedShow boolean:false array:string:'/usr/share/thirdreality/animation/volume-changed.animation'

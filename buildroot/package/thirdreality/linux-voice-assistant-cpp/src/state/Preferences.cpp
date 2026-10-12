@@ -9,6 +9,7 @@
 #include <system_error>
 
 #include <fcntl.h>
+#include <sys/file.h>
 #include <unistd.h>
 
 #include <nlohmann/json.hpp>
@@ -21,6 +22,34 @@ namespace {
 
 constexpr const char* kTag = "prefs";
 constexpr const char* kSoundFileName = "sound.json";
+constexpr const char* kSoundLockPath = "/tmp/sound_config.lock";
+
+class ScopedSoundConfigLock {
+   public:
+    explicit ScopedSoundConfigLock(bool required) {
+        if (!required) {
+            locked_ = true;
+            return;
+        }
+        fd_ = ::open(kSoundLockPath,
+                     O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+        if (fd_ >= 0 && ::flock(fd_, LOCK_EX) == 0) {
+            locked_ = true;
+        }
+    }
+
+    ~ScopedSoundConfigLock() {
+        if (fd_ < 0) return;
+        if (locked_) ::flock(fd_, LOCK_UN);
+        ::close(fd_);
+    }
+
+    bool locked() const noexcept { return locked_; }
+
+   private:
+    int  fd_ = -1;
+    bool locked_ = false;
+};
 
 double Clamp01(double v) noexcept {
     if (v < 0.0) return 0.0;
@@ -216,10 +245,26 @@ bool Preferences::SaveToFile(const std::filesystem::path& storage_path) const {
         }
     }
 
+    ScopedSoundConfigLock lock(format_ == Format::kSound);
+    if (!lock.locked()) {
+        LVA_LOGW(kTag, "failed to lock %s", kSoundLockPath);
+        return false;
+    }
+
+    std::string base_text = raw_data_text_;
+    if (format_ == Format::kSound) {
+        std::ifstream current(storage_path);
+        if (current) {
+            std::ostringstream content;
+            content << current.rdbuf();
+            base_text = content.str();
+        }
+    }
+
     nlohmann::json obj;
-    if (!raw_data_text_.empty()) {
+    if (!base_text.empty()) {
         try {
-            obj = nlohmann::json::parse(raw_data_text_);
+            obj = nlohmann::json::parse(base_text);
         } catch (...) {
             obj = nlohmann::json::object();
         }

@@ -107,7 +107,6 @@ class Satellite {
 
     // Music player ducking state.
     bool   ducked_           = false;
-    double pre_duck_volume_  = 1.0;
 
     std::atomic<std::int64_t> refractory_until_ns_{0};
 

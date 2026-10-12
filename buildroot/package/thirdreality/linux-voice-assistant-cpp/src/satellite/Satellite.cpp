@@ -373,8 +373,7 @@ void Satellite::Duck() {
     ducked_ = true;
     lva::tr::SendspinDuck();
     if (state_.music_player) {
-        pre_duck_volume_ = state_.volume.load(std::memory_order_relaxed);
-        state_.music_player->SetVolume(pre_duck_volume_ * kDuckFactor);
+        state_.music_player->SetGain(kDuckFactor);
     }
 }
 
@@ -383,7 +382,7 @@ void Satellite::Unduck() {
     ducked_ = false;
     lva::tr::SendspinUnduck();
     if (state_.music_player) {
-        state_.music_player->SetVolume(pre_duck_volume_);
+        state_.music_player->SetGain(1.0);
     }
 }
 

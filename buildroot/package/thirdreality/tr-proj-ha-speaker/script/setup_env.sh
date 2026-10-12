@@ -63,7 +63,17 @@ fi
 # set mic gain
 amixer cset numid=7 "$MIC_GAIN"% > /dev/null 2>&1
 # set volume
-pactl set-sink-volume @DEFAULT_SINK@ "$VOL"% > /dev/null 2>&1
+VOLUME_READY=0
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if /usr/bin/tr-volume set "$VOL" > /dev/null 2>&1; then
+        VOLUME_READY=1
+        break
+    fi
+    sleep 0.5
+done
+if [ "$VOLUME_READY" -ne 1 ]; then
+    echo "Warning: failed to apply the persisted speaker volume"
+fi
 # enable speaker
 if [ ! -d "/sys/class/gpio/gpio414" ]; then
     echo 414 > /sys/class/gpio/export

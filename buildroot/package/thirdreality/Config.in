@@ -22,6 +22,7 @@ menu "thirdreality"
     source "package/thirdreality/python-getmac/Config.in"
     source "package/thirdreality/python-webrtc-noise-gain/Config.in"
 
+    source "package/thirdreality/tr-volume/Config.in"
     source "package/thirdreality/tr-buttond/Config.in"
     source "package/thirdreality/tr-ledring/Config.in"
     source "package/thirdreality/tr-proj-ha-speaker/Config.in"
