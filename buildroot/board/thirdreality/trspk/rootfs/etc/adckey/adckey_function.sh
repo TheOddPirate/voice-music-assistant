@@ -102,6 +102,9 @@ factory_reset() {
 }
 
 mic_mute() {
+    exec 200>"$LOCK_FILE"
+    flock -x 200
+
     status=$(cat /sys/class/gpio/gpio438/value)
 
     if [ $status = "1" ]; then
@@ -115,6 +118,25 @@ mic_mute() {
     tmpfile=$(mktemp)
     jq --argjson v "$status" '.mic_mute = $v' "$SOUND_CONF" > "$tmpfile" && mv "$tmpfile" "$SOUND_CONF"
     sync
+
+    flock -u 200
+    exec 200>&-
+}
+
+set_mic_mute() {
+    status="$1"
+    [ "$status" = "0" ] || [ "$status" = "1" ] || exit 1
+
+    exec 200>"$LOCK_FILE"
+    flock -x 200
+
+    echo "$status" > /sys/class/gpio/gpio438/value
+    tmpfile=$(mktemp)
+    jq --argjson v "$status" '.mic_mute = $v' "$SOUND_CONF" > "$tmpfile" && mv "$tmpfile" "$SOUND_CONF"
+    sync
+
+    flock -u 200
+    exec 200>&-
 }
 
 set_volume() {
@@ -159,6 +181,7 @@ case $1 in
     "Volup") vol "up" ;;
     "Voldown") vol "down" ;;
     "SetVolume") set_volume "$2" ;;
+    "SetMicMute") set_mic_mute "$2" ;;
     "Home") echo "home was pressed";;
     "longpressTap") change_wifi ;;
     "Mute") mic_mute ;;

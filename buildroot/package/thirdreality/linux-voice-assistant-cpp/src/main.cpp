@@ -971,6 +971,14 @@ int main(int argc, char** argv) {
                 state.PersistVolume(static_cast<double>(*value) / 100.0);
                 return true;
             }
+            if (const auto value =
+                    ParseControlInteger(cmd, "CONFIG_SET_MIC_MUTE:")) {
+                if (*value != 0 && *value != 1) return false;
+                const bool muted = (*value == 0);
+                state.PersistMuted(muted);
+                state.PlayMuteToggleSound(muted);
+                return true;
+            }
             return false;
         });
     {

@@ -20,7 +20,7 @@
 //                                          MUSIC_TOGGLE
 //   Tap  double                         -> sendspin socket LED_TOGGLE
 //
-// Volume updates go to lva, the normal sound.json owner. If lva is
+// Volume and mute updates go to lva, the normal sound.json owner. If lva is
 // unavailable, the existing shell script remains the fallback. Factory reset
 // and Wi-Fi actions always stay in the ThirdReality-owned shell script.
 
@@ -51,6 +51,7 @@ constexpr const char* kAdckeyScript   = "/etc/adckey/adckey_function.sh";
 constexpr const char* kLvaSocket      = "/tmp/lva-control.sock";
 constexpr const char* kSendspinSocket = "/tmp/sendspin-control.sock";
 constexpr const char* kSoundConfig    = "/data/conf/sound.json";
+constexpr const char* kMicMuteGpio    = "/sys/class/gpio/gpio438/value";
 
 // Key codes (see /etc/gpio_key.kl).
 constexpr int kKeyVoldown = 114;
@@ -151,6 +152,15 @@ bool SendConfigToLva(const char* command) {
     return n == 2 && std::memcmp(reply, "OK", 2) == 0;
 }
 
+int ReadIntegerFile(const char* path) {
+    FILE* file = std::fopen(path, "r");
+    if (!file) return -1;
+    int value = -1;
+    if (std::fscanf(file, "%d", &value) != 1) value = -1;
+    std::fclose(file);
+    return value;
+}
+
 int ReadSoundVolume() {
     FILE* file = std::fopen(kSoundConfig, "r");
     if (!file) return -1;
@@ -203,6 +213,23 @@ void RunScript(const char* arg) {
             char fallback[32];
             std::snprintf(fallback, sizeof(fallback),
                           "SetVolume %d", desired);
+            RunScriptCommand(fallback);
+            return;
+        }
+    }
+
+    if (std::strcmp(arg, "Mute") == 0) {
+        const int current = ReadIntegerFile(kMicMuteGpio);
+        if (current == 0 || current == 1) {
+            const int desired = current == 0 ? 1 : 0;
+            char request[40];
+            std::snprintf(request, sizeof(request),
+                          "CONFIG_SET_MIC_MUTE:%d", desired);
+            if (SendConfigToLva(request)) return;
+
+            char fallback[32];
+            std::snprintf(fallback, sizeof(fallback),
+                          "SetMicMute %d", desired);
             RunScriptCommand(fallback);
             return;
         }
